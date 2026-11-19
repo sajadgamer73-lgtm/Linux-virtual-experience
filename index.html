@@ -164,7 +164,7 @@ footer{text-align:center;color:var(--muted);padding:25px}
 
 <div class="field">
 <label>Octal Permission</label>
-<input id="octal" maxlength="3">
+<input id="octal" maxlength="4">
 </div>
 </div>
 
@@ -311,6 +311,8 @@ let nodes=[
 
 let current="/home";
 let selected=null;
+let user="student";
+const userGroup="users";
 
 const $=id=>document.getElementById(id);
 
@@ -321,8 +323,18 @@ $("output").appendChild(d);
 $("output").scrollTop=$("output").scrollHeight;
 }
 
+function norm(p){
+let o=[];
+String(p||"/").split("/").forEach(s=>{
+if(!s||s===".")return;
+if(s===".."){o.pop();return;}
+o.push(s);
+});
+return "/"+o.join("/");
+}
+
 function path(n){
-return n.parent+"/"+n.name;
+return norm(n.parent+"/"+n.name);
 }
 
 function children(){
@@ -334,15 +346,26 @@ return nodes.find(n=>n.name===name && n.parent===current);
 }
 
 function symbolic(n){
-let p=String(n.perm).padStart(3,"0").split("");
+let p=String(n.perm).padStart(3,"0").slice(-3).split("");
+let set=String(n.perm).length>3?String(n.perm)[0]:"0";
 let chars="";
-p.forEach(v=>{
+p.forEach((v,i)=>{
 v=Number(v);
 chars+=(v&4)?"r":"-";
 chars+=(v&2)?"w":"-";
-chars+=(v&1)?"x":"-";
+let x=(v&1)?"x":"-";
+if(i===0&&(set&4))x="s";
+if(i===1&&(set&2))x="s";
+if(i===2&&(set&1))x="t";
+chars+=x;
 });
 return (n.type==="dir"?"d":"-")+chars;
+}
+function can(n,bit){
+if(user==="root")return true;
+if(n.owner===user)return !!(n.perm&(bit*100));
+if(n.group===userGroup)return !!(n.perm&(bit*10));
+return !!(n.perm&bit);
 }
 
 function renderFiles(){
@@ -366,6 +389,7 @@ $("files").appendChild(div);
 }
 
 function selectFile(n){
+if(n&&!can(n,4)){print("Permission denied (no read)");return;}
 selected=n;
 $("empty").classList.add("hidden");
 $("editor").classList.remove("hidden");
@@ -501,12 +525,11 @@ $("terminalInput").value=command;
 execute();
 }
 
-function execute(){
-let raw=$("terminalInput").value.trim();
+function execute(rawIn){
+let raw=(rawIn||$("terminalInput").value).trim();
 if(!raw)return;
-
-$("terminalInput").value="";
-print("student@linux-lab:"+current+"$ "+raw);
+if(!rawIn)$("terminalInput").value="";
+print(user+"@linux-lab:"+current+(user==="root"?"# ":"$ ")+raw);
 
 let args=raw.match(/(?:[^\s"]+|"[^"]*")+/g)||[];
 let cmd=args[0];
@@ -524,7 +547,7 @@ print(current);
 break;
 
 case "whoami":
-print("student");
+print(user);
 break;
 
 case "ls":
@@ -540,23 +563,20 @@ if(!name){print("حدد الاسم");break;}
 if(find(name)){print("الاسم موجود");break;}
 nodes.push({
 name,type:cmd==="mkdir"?"dir":"file",
-parent:current,owner:"student",
-group:"users",perm:cmd==="mkdir"?755:644,
+parent:current,owner:user,
+group:userGroup,perm:cmd==="mkdir"?755:644,
 content:""
 });
 renderFiles();
 print("Created successfully");
 break;
 
-case "cd":
-if(name===".." ){
-current=current.substring(0,current.lastIndexOf("/"))||"/";
-}else if(!name||name==="~"){
-current="/home";
-}else{
+case "cd":{
 let n=find(name);
-if(n&&n.type==="dir")current=path(n);
-else print("Directory not found");
+if(!name||name==="~"){current="/home";break;}
+if(name===".."||name.startsWith("../")||name.startsWith("/")){current=norm(current+"/"+name);break;}
+if(n&&n.type==="dir")current=path(n);else print("Directory not found");
+break;
 }
 renderFiles();
 break;
@@ -582,6 +602,7 @@ break;
 case "cp":{
 let n=find(name);
 if(!n||!target){print("Usage: cp source destination");break;}
+if(find(target)){print("Destination exists");break;}
 nodes.push({...n,name:target,content:n.content});
 renderFiles();
 print("Copied successfully");
@@ -599,7 +620,9 @@ break;
 
 case "cat":{
 let n=find(name);
-print(n?n.content:"File not found");
+if(!n){print("File not found");break;}
+if(!can(n,4)){print("Permission denied");break;}
+print(n.content);
 break;
 }
 
@@ -614,7 +637,7 @@ break;
 
 case "chmod":{
 let n=find(target);
-if(!n||!/^[0-7]{3}$/.test(name||"")){
+if(!n||!/^[0-7]{3,4}$/.test(name||"")){
 print("Usage: chmod 755 file");
 break;
 }
@@ -628,6 +651,7 @@ break;
 case "chown":{
 let n=find(target);
 if(!n){print("File not found");break;}
+if(user!=="root"){print("Permission denied (need sudo)");break;}
 let parts=name.split(":");
 n.owner=parts[0]||n.owner;
 n.group=parts[1]||n.group;
@@ -641,9 +665,16 @@ case "umask":
 print("0022");
 break;
 
-case "echo":
-print(args.slice(1).join(" "));
+case "echo":{
+let rest=args.slice(1),r=rest.findIndex(x=>x===">"||x===">>"),txt=rest.slice(0,r<0?rest.length:r).join(" ");
+if(r<0){print(txt);break;}
+let f=find(rest[r+1]);
+if(!f||f.type!=="file"){print("File not found");break;}
+if(!can(f,2)){print("Permission denied");break;}
+f.content=rest[r]===">>"?f.content+txt+"\n":txt+"\n";
+print("Written to "+f.name);
 break;
+}
 
 case "clear":
 $("output").innerHTML="";
@@ -668,8 +699,9 @@ break;
 }
 
 case "find":{
-let results=nodes.filter(n=>n.name===name);
-print(results.map(path).join("\n")||"No results");
+let pat=args[3]||target||name;
+if(!pat||pat==="-name"){print("Usage: find . -name file");break;}
+print(nodes.filter(n=>n.name===pat).map(n=>"."+path(n).replace(/^\/home/,"")).join("\n")||"No results");
 break;
 }
 
@@ -679,9 +711,12 @@ print(c?c[2]:"No manual available");
 break;
 }
 
-case "sudo":
-print("Educational simulation only.");
+case "sudo":{
+if(!name){print("Run: sudo <command>");break;}
+let sub=raw.slice(raw.indexOf("sudo")+4).trim();
+let prev=user;user="root";execute(sub);user=prev;
 break;
+}
 
 default:
 print("Command not found. Type help.");
